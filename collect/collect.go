@@ -51,6 +51,7 @@ type Collector interface {
 	Stressed() bool
 	GetStressedSampleRate(traceID string) (rate uint, keep bool, reason string)
 	ProcessSpanImmediately(sp *types.Span) (processed bool, keep bool)
+	ProcessIndividualSpan(sp *types.Span)
 }
 
 func GetCollectorImplementation(c config.Config) Collector {
@@ -65,6 +66,7 @@ const (
 	TraceSendEjectedFull    = "trace_send_ejected_full"
 	TraceSendEjectedMemsize = "trace_send_ejected_memsize"
 	TraceSendLateSpan       = "trace_send_late_span"
+	TraceSendIndividualSpan = "trace_send_individual_span"
 )
 
 type sendableTrace struct {
@@ -844,6 +846,101 @@ func (i *InMemCollector) processSpan(ctx context.Context, sp *types.Span, source
 		}
 	}
 
+}
+
+func (i *InMemCollector) makeIndividualSpanDecision(trace *types.Trace) *TraceDecision {
+	var sampler sample.Sampler
+	var found bool
+	samplerSelector, isLegacyKey := trace.GetSamplerKey()
+
+	if sampler, found = i.datasetSamplers[samplerSelector]; !found {
+		sampler = i.SamplerFactory.GetSamplerImplementationForKey(samplerSelector, isLegacyKey)
+		i.datasetSamplers[samplerSelector] = sampler
+	}
+
+	rate, shouldSend, reason, key := sampler.GetSampleRate(trace)
+	trace.SetSampleRate(rate)
+	trace.KeepSample = shouldSend
+
+	return &TraceDecision{
+		TraceID:         trace.ID(),
+		Kept:            shouldSend,
+		Reason:          reason,
+		SamplerKey:      key,
+		SamplerSelector: samplerSelector,
+		Rate:            rate,
+		SendReason:      TraceSendIndividualSpan,
+		Count:           trace.SpanCount(),
+		EventCount:      trace.SpanEventCount(),
+		LinkCount:       trace.SpanLinkCount(),
+		HasRoot:         true,
+	}
+
+}
+
+// ProcessIndividualSpan is used to handle spans with the
+// meta.refinery.individual_span attribute set. This tells us to make a decision
+// immediately on just this span independently from the rest of its trace. We
+// still apply the configured samplers, using them as though this were a trace
+// of a single span. The decision is not saved and nothing enters the cache.
+// Since the trace does not need to be aggregated, there is no need to
+// redistribute the span to peers.
+func (i *InMemCollector) ProcessIndividualSpan(sp *types.Span) {
+	_, span := otelutil.StartSpanWith(context.Background(), i.Tracer, "collector.ProcessIndividualSpan", "trace_id", sp.TraceID)
+	defer span.End()
+
+	now := i.Clock.Now()
+
+	trace := &types.Trace{
+		APIHost:     sp.APIHost,
+		APIKey:      sp.APIKey,
+		Dataset:     sp.Dataset,
+		TraceID:     sp.TraceID,
+		ArrivalTime: now,
+		SendBy:      now,
+	}
+	trace.SetSampleRate(sp.SampleRate)
+
+	td := i.makeIndividualSpanDecision(trace)
+
+	if !td.Kept && !i.Config.GetIsDryRun() {
+		i.Metrics.Increment("individual_span_dropped")
+		return
+	}
+
+	i.Metrics.Increment(td.SendReason)
+
+	// if we have a key replacement rule, we should
+	// replace the key with the new key
+	keycfg := i.Config.GetAccessKeyConfig()
+	overwriteWith, err := keycfg.GetReplaceKey(trace.APIKey)
+	if err != nil {
+		i.Logger.Warn().Logf("error replacing key: %s", err.Error())
+		return
+	}
+	if overwriteWith != trace.APIKey {
+		trace.APIKey = overwriteWith
+	}
+
+	if i.Config.GetAddRuleReasonToTrace() {
+		sp.Data["meta.refinery.reason"] = td.Reason
+		sp.Data["meta.refinery.send_reason"] = td.SendReason
+		if td.SamplerKey != "" {
+			sp.Data["meta.refinery.sample_key"] = td.SamplerKey
+		}
+	}
+	isDryRun := i.Config.GetIsDryRun()
+	if isDryRun {
+		sp.Data[config.DryRunFieldName] = td.Kept
+	}
+	if i.hostname != "" {
+		sp.Data["meta.refinery.local_hostname"] = i.hostname
+	}
+	mergeTraceAndSpanSampleRates(sp, trace.SampleRate(), isDryRun)
+	i.addAdditionalAttributes(sp)
+
+	sp.APIKey = trace.APIKey
+	i.Transmission.EnqueueSpan(sp)
 }
 
 // ProcessSpanImmediately is an escape hatch used under stressful conditions --

@@ -923,3 +923,72 @@ func TestProcessEventMetrics(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessIndividualSpanAttribute(t *testing.T) {
+	mockMetrics := &metrics.MockMetrics{}
+	mockMetrics.Start()
+
+	mockTransmission := &transmit.MockTransmission{}
+	mockTransmission.Start()
+	defer mockTransmission.Stop()
+
+	mockPeerTransmission := &transmit.MockTransmission{}
+	mockPeerTransmission.Start()
+	defer mockPeerTransmission.Stop()
+
+	mockCollector := collect.NewMockCollector()
+
+	mockConfig := &config.MockConfig{
+		TraceIdFieldNames:  []string{"trace.trace_id"},
+		ParentIdFieldNames: []string{"trace.parent_id", "parentId"},
+	}
+
+	mockSharder := &sharder.MockSharder{
+		Self: &sharder.TestShard{
+			Addr: "http://localhost:12345",
+		},
+	}
+
+	router := &Router{
+		Config:               mockConfig,
+		Logger:               &logger.NullLogger{},
+		Metrics:              mockMetrics,
+		UpstreamTransmission: mockTransmission,
+		PeerTransmission:     mockPeerTransmission,
+		Collector:            mockCollector,
+		Sharder:              mockSharder,
+		incomingOrPeer:       "incoming",
+		iopLogger:            iopLogger{Logger: &logger.NullLogger{}, incomingOrPeer: "incoming"},
+		environmentCache:     newEnvironmentCache(time.Second, nil),
+	}
+
+	// Create test event with individual_span attribute and trace ID
+	event := &types.Event{
+		Context:   context.Background(),
+		APIHost:   "test.honeycomb.io",
+		Dataset:   "test-dataset",
+		Timestamp: time.Now(),
+		Data: map[string]interface{}{
+			"trace.trace_id":                "test-trace-123",
+			"meta.refinery.individual_span": true,
+			"test_attribute":                "test_value",
+		},
+	}
+
+	// Process the event
+	err := router.processEvent(event, "request-123")
+	assert.NoError(t, err)
+
+	// Verify that the span was processed individually
+	assert.NotNil(t, mockCollector.ProcessedIndividualSpan, "Expected a span to be processed individually")
+	assert.Equal(t, "test-trace-123", mockCollector.ProcessedIndividualSpan.TraceID)
+	assert.Equal(t, true, mockCollector.ProcessedIndividualSpan.Data["meta.refinery.individual_span"])
+	assert.Equal(t, "test_value", mockCollector.ProcessedIndividualSpan.Data["test_attribute"])
+
+	// Verify that no spans were sent to normal collection channels
+	assert.Equal(t, 0, len(mockCollector.Spans), "Expected no spans to be sent to normal collection")
+
+	// Verify that no events were sent to transmission channels
+	assert.Equal(t, 0, len(mockTransmission.Events), "Expected no events to be sent to upstream transmission")
+	assert.Equal(t, 0, len(mockPeerTransmission.Events), "Expected no events to be sent to peer transmission")
+}

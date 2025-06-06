@@ -6,6 +6,7 @@ import (
 
 type MockCollector struct {
 	Spans chan *types.Span
+	ProcessedIndividualSpan *types.Span
 }
 
 func NewMockCollector() *MockCollector {
@@ -32,6 +33,10 @@ func (m *MockCollector) ProcessSpanImmediately(sp *types.Span) (bool, bool) {
 	m.Spans <- sp
 
 	return true, true
+}
+
+func (m *MockCollector) ProcessIndividualSpan(sp *types.Span) {
+	m.ProcessedIndividualSpan = sp
 }
 
 func (m *MockCollector) Stressed() bool {

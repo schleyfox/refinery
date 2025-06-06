@@ -2552,3 +2552,155 @@ func TestSpanLimitSendByPreservation(t *testing.T) {
 	require.Equal(t, trace.SendBy.Unix(), updatedTrace.SendBy.Unix())
 
 }
+
+func TestProcessIndividualSpan(t *testing.T) {
+	conf := &config.MockConfig{
+		GetTracesConfigVal: config.TracesConfig{
+			SendTicker:   config.Duration(2 * time.Millisecond),
+			SendDelay:    config.Duration(1 * time.Millisecond),
+			TraceTimeout: config.Duration(5 * time.Minute),
+			MaxBatchSize: 500,
+		},
+		GetSamplerTypeVal:  &config.DeterministicSamplerConfig{SampleRate: 1},
+		ParentIdFieldNames: []string{"trace.parent_id", "parentId"},
+		GetCollectionConfigVal: config.CollectionConfig{
+			ShutdownDelay: config.Duration(1 * time.Millisecond),
+		},
+		SampleCache: config.SampleCacheConfig{
+			KeptSize:          100,
+			DroppedSize:       100,
+			SizeCheckInterval: config.Duration(1 * time.Second),
+		},
+	}
+	conf.GetSamplerTypeVal = &config.DeterministicSamplerConfig{SampleRate: 1}
+	conf.GetSamplerTypeName = "DeterministicSampler"
+	conf.DryRun = false
+
+	transmission := &transmit.MockTransmission{}
+	transmission.Start()
+	defer transmission.Stop()
+	peerTransmission := &transmit.MockTransmission{}
+	peerTransmission.Start()
+	defer peerTransmission.Stop()
+
+	c := newTestCollector(conf, transmission, peerTransmission)
+
+	err := c.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Stop()
+
+	// Create a test span
+	sp := &types.Span{
+		TraceID: "test-trace-id",
+		Event: types.Event{
+			APIKey:  "test-key",
+			Dataset: "test-dataset",
+			Data: map[string]interface{}{
+				"name": "test-span",
+			},
+		},
+	}
+
+	// Process the individual span
+	c.ProcessIndividualSpan(sp)
+
+	// Verify the span was enqueued
+	events := transmission.GetBlock(1)
+	if len(events) != 1 {
+		t.Errorf("Expected 1 span to be enqueued, got %d", len(events))
+	}
+
+	// Verify the enqueued span has the expected data
+	enqueuedSpan := events[0]
+	if enqueuedSpan.Data["name"] != "test-span" {
+		t.Errorf("Expected span name 'test-span', got %v", enqueuedSpan.Data["name"])
+	}
+
+	// Verify the span is not in the sample trace cache
+	if _, _, found := c.sampleTraceCache.CheckSpan(sp); found {
+		t.Error("Expected span to not be in sample trace cache")
+	}
+
+	// Test with a span that should be dropped (non-dry run)
+	transmission.Events = make(chan *types.Event, 100) // Clear previous events
+	conf.GetSamplerTypeVal = &config.RulesBasedSamplerConfig{Rules: []*config.RulesBasedSamplerRule{
+		{
+			Drop: true,
+		},
+	}}
+	c.Stop()
+	err = c.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sp2 := &types.Span{
+		TraceID: "test-trace-id-2",
+		Event: types.Event{
+			APIKey:  "test-key",
+			Dataset: "test-dataset",
+			Data: map[string]interface{}{
+				"name": "test-span-2",
+			},
+		},
+	}
+
+	// Process the individual span
+	c.ProcessIndividualSpan(sp2)
+
+	// Verify the span was NOT enqueued since it should be dropped
+	// Use a small timeout to check if any events were enqueued
+	select {
+	case event := <-transmission.Events:
+		t.Errorf("Expected no spans to be enqueued (dropped), but got one: %v", event)
+	default:
+		// No events were enqueued, which is what we want
+	}
+
+	// Test with a span that should be dropped but isn't because of dry-run
+	transmission.Events = make(chan *types.Event, 100) // Clear previous events
+	conf.DryRun = true
+	conf.GetSamplerTypeVal = &config.RulesBasedSamplerConfig{Rules: []*config.RulesBasedSamplerRule{
+		{
+			Drop: true,
+		},
+	}}
+	c.Stop()
+	err = c.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sp3 := &types.Span{
+		TraceID: "test-trace-id-3",
+		Event: types.Event{
+			APIKey:  "test-key",
+			Dataset: "test-dataset",
+			Data: map[string]interface{}{
+				"name": "test-span-3",
+			},
+		},
+	}
+
+	// Process the individual span
+	c.ProcessIndividualSpan(sp3)
+
+	// Verify the span was enqueued
+	events = transmission.GetBlock(1)
+	if len(events) != 1 {
+		t.Errorf("Expected 1 span to be enqueued, got %d", len(events))
+	}
+
+	// Verify the enqueued span has the expected data
+	enqueuedSpan = events[0]
+	if enqueuedSpan.Data["name"] != "test-span-3" {
+		t.Errorf("Expected span name 'test-span-3', got %v", enqueuedSpan.Data["name"])
+	}
+
+	// Verify the span is not in the sample trace cache
+	if _, _, found := c.sampleTraceCache.CheckSpan(sp3); found {
+		t.Error("Expected span to not be in sample trace cache")
+	}
+}
