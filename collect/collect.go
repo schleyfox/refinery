@@ -898,7 +898,9 @@ func (i *InMemCollector) ProcessIndividualSpan(sp *types.Span) {
 		TraceID:     sp.TraceID,
 		ArrivalTime: now,
 		SendBy:      now,
+		RootSpan:    sp,
 	}
+	trace.AddSpan(sp)
 	trace.SetSampleRate(sp.SampleRate)
 
 	td := i.makeIndividualSpanDecision(trace)
