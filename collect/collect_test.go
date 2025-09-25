@@ -2553,7 +2553,7 @@ func TestSpanLimitSendByPreservation(t *testing.T) {
 
 }
 
-func TestProcessIndividualSpan(t *testing.T) {
+func TestAddIndividualSpan(t *testing.T) {
 	conf := &config.MockConfig{
 		GetTracesConfigVal: config.TracesConfig{
 			SendTicker:   config.Duration(2 * time.Millisecond),
@@ -2564,6 +2564,7 @@ func TestProcessIndividualSpan(t *testing.T) {
 		GetSamplerTypeVal:  &config.DeterministicSamplerConfig{SampleRate: 1},
 		ParentIdFieldNames: []string{"trace.parent_id", "parentId"},
 		GetCollectionConfigVal: config.CollectionConfig{
+			CacheCapacity: 3,
 			ShutdownDelay: config.Duration(1 * time.Millisecond),
 		},
 		SampleCache: config.SampleCacheConfig{
