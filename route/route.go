@@ -653,7 +653,7 @@ func (r *Router) processEvent(ev *types.Event, reqID interface{}) error {
 	// the sampler rules by itself without waiting for other spans or retaining
 	// the decision. This maybe should go before stress relief.
 	if !isProbe && span.Data["meta.refinery.individual_span"] != nil {
-		r.Collector.ProcessIndividualSpan(span)
+		r.Collector.AddIndividualSpan(span)
 
 		return nil
 	}

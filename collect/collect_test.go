@@ -2604,7 +2604,7 @@ func TestProcessIndividualSpan(t *testing.T) {
 	}
 
 	// Process the individual span
-	c.ProcessIndividualSpan(sp)
+	c.AddIndividualSpan(sp)
 
 	// Verify the span was enqueued
 	events := transmission.GetBlock(1)
@@ -2648,7 +2648,7 @@ func TestProcessIndividualSpan(t *testing.T) {
 	}
 
 	// Process the individual span
-	c.ProcessIndividualSpan(sp2)
+	c.AddIndividualSpan(sp2)
 
 	// Verify the span was NOT enqueued since it should be dropped
 	// Use a small timeout to check if any events were enqueued
@@ -2685,7 +2685,7 @@ func TestProcessIndividualSpan(t *testing.T) {
 	}
 
 	// Process the individual span
-	c.ProcessIndividualSpan(sp3)
+	c.AddIndividualSpan(sp3)
 
 	// Verify the span was enqueued
 	events = transmission.GetBlock(1)

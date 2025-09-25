@@ -47,11 +47,11 @@ type Collector interface {
 	// Once the trace is "complete", it'll be passed off to the sampler then
 	// scheduled for transmission.
 	AddSpan(*types.Span) error
+	AddIndividualSpan(*types.Span) error
 	AddSpanFromPeer(*types.Span) error
 	Stressed() bool
 	GetStressedSampleRate(traceID string) (rate uint, keep bool, reason string)
 	ProcessSpanImmediately(sp *types.Span) (processed bool, keep bool)
-	ProcessIndividualSpan(sp *types.Span)
 }
 
 func GetCollectorImplementation(c config.Config) Collector {
@@ -107,12 +107,13 @@ type InMemCollector struct {
 
 	sampleTraceCache cache.TraceSentCache
 
-	incoming          chan *types.Span
-	fromPeer          chan *types.Span
-	outgoingTraces    chan sendableTrace
-	reload            chan struct{}
-	done              chan struct{}
-	redistributeTimer *redistributeNotifier
+	incoming               chan *types.Span
+	incomingIndividualSpan chan *types.Span
+	fromPeer               chan *types.Span
+	outgoingTraces         chan sendableTrace
+	reload                 chan struct{}
+	done                   chan struct{}
+	redistributeTimer      *redistributeNotifier
 
 	dropDecisionMessages chan string
 	keptDecisionMessages chan string
@@ -196,9 +197,11 @@ func (i *InMemCollector) Start() error {
 	}
 
 	i.incoming = make(chan *types.Span, imcConfig.GetIncomingQueueSize())
+	i.incomingIndividualSpan = make(chan *types.Span, imcConfig.GetIncomingQueueSize())
 	i.fromPeer = make(chan *types.Span, imcConfig.GetPeerQueueSize())
 	i.outgoingTraces = make(chan sendableTrace, 100_000)
 	i.Metrics.Store("INCOMING_CAP", float64(cap(i.incoming)))
+	i.Metrics.Store("INCOMING_INDIVIDUAL_CAP", float64(cap(i.incomingIndividualSpan)))
 	i.Metrics.Store("PEER_CAP", float64(cap(i.fromPeer)))
 	i.reload = make(chan struct{}, 1)
 	i.done = make(chan struct{})
@@ -350,6 +353,10 @@ func (i *InMemCollector) AddSpan(sp *types.Span) error {
 	return i.add(sp, i.incoming)
 }
 
+func (i *InMemCollector) AddIndividualSpan(sp *types.Span) error {
+	return i.add(sp, i.incomingIndividualSpan)
+}
+
 // AddSpan accepts the incoming span to a queue and returns immediately
 func (i *InMemCollector) AddSpanFromPeer(sp *types.Span) error {
 	return i.add(sp, i.fromPeer)
@@ -463,6 +470,13 @@ func (i *InMemCollector) collect() {
 					return
 				}
 				i.processSpan(ctx, sp, "incoming")
+			case sp, ok := <-i.incomingIndividualSpan:
+				if !ok {
+					// channel's been closed; we should shut down.
+					span.End()
+					return
+				}
+				i.processIndividualSpan(ctx, sp)
 			case sp, ok := <-i.fromPeer:
 				if !ok {
 					// channel's been closed; we should shut down.
@@ -878,15 +892,15 @@ func (i *InMemCollector) makeIndividualSpanDecision(trace *types.Trace) *TraceDe
 
 }
 
-// ProcessIndividualSpan is used to handle spans with the
+// processIndividualSpan is used to handle spans with the
 // meta.refinery.individual_span attribute set. This tells us to make a decision
 // immediately on just this span independently from the rest of its trace. We
 // still apply the configured samplers, using them as though this were a trace
 // of a single span. The decision is not saved and nothing enters the cache.
 // Since the trace does not need to be aggregated, there is no need to
 // redistribute the span to peers.
-func (i *InMemCollector) ProcessIndividualSpan(sp *types.Span) {
-	_, span := otelutil.StartSpanWith(context.Background(), i.Tracer, "collector.ProcessIndividualSpan", "trace_id", sp.TraceID)
+func (i *InMemCollector) processIndividualSpan(ctx context.Context, sp *types.Span) {
+	_, span := otelutil.StartSpanWith(ctx, i.Tracer, "collector.processIndividualSpan", "trace_id", sp.TraceID)
 	defer span.End()
 
 	now := i.Clock.Now()
