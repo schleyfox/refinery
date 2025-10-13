@@ -47,6 +47,7 @@ type Collector interface {
 	// Once the trace is "complete", it'll be passed off to the sampler then
 	// scheduled for transmission.
 	AddSpan(*types.Span) error
+	AddIndividualSpan(*types.Span) error
 	AddSpanFromPeer(*types.Span) error
 	Stressed() bool
 	GetStressedSampleRate(traceID string) (rate uint, keep bool, reason string)
@@ -65,6 +66,7 @@ const (
 	TraceSendEjectedFull    = "trace_send_ejected_full"
 	TraceSendEjectedMemsize = "trace_send_ejected_memsize"
 	TraceSendLateSpan       = "trace_send_late_span"
+	TraceSendIndividualSpan = "trace_send_individual_span"
 )
 
 type sendableTrace struct {
@@ -105,12 +107,13 @@ type InMemCollector struct {
 
 	sampleTraceCache cache.TraceSentCache
 
-	incoming          chan *types.Span
-	fromPeer          chan *types.Span
-	outgoingTraces    chan sendableTrace
-	reload            chan struct{}
-	done              chan struct{}
-	redistributeTimer *redistributeNotifier
+	incoming               chan *types.Span
+	incomingIndividualSpan chan *types.Span
+	fromPeer               chan *types.Span
+	outgoingTraces         chan sendableTrace
+	reload                 chan struct{}
+	done                   chan struct{}
+	redistributeTimer      *redistributeNotifier
 
 	dropDecisionMessages chan string
 	keptDecisionMessages chan string
@@ -194,9 +197,11 @@ func (i *InMemCollector) Start() error {
 	}
 
 	i.incoming = make(chan *types.Span, imcConfig.GetIncomingQueueSize())
+	i.incomingIndividualSpan = make(chan *types.Span, imcConfig.GetIncomingQueueSize())
 	i.fromPeer = make(chan *types.Span, imcConfig.GetPeerQueueSize())
 	i.outgoingTraces = make(chan sendableTrace, 100_000)
 	i.Metrics.Store("INCOMING_CAP", float64(cap(i.incoming)))
+	i.Metrics.Store("INCOMING_INDIVIDUAL_CAP", float64(cap(i.incomingIndividualSpan)))
 	i.Metrics.Store("PEER_CAP", float64(cap(i.fromPeer)))
 	i.reload = make(chan struct{}, 1)
 	i.done = make(chan struct{})
@@ -348,6 +353,10 @@ func (i *InMemCollector) AddSpan(sp *types.Span) error {
 	return i.add(sp, i.incoming)
 }
 
+func (i *InMemCollector) AddIndividualSpan(sp *types.Span) error {
+	return i.add(sp, i.incomingIndividualSpan)
+}
+
 // AddSpan accepts the incoming span to a queue and returns immediately
 func (i *InMemCollector) AddSpanFromPeer(sp *types.Span) error {
 	return i.add(sp, i.fromPeer)
@@ -461,6 +470,13 @@ func (i *InMemCollector) collect() {
 					return
 				}
 				i.processSpan(ctx, sp, "incoming")
+			case sp, ok := <-i.incomingIndividualSpan:
+				if !ok {
+					// channel's been closed; we should shut down.
+					span.End()
+					return
+				}
+				i.processIndividualSpan(ctx, sp)
 			case sp, ok := <-i.fromPeer:
 				if !ok {
 					// channel's been closed; we should shut down.
@@ -844,6 +860,103 @@ func (i *InMemCollector) processSpan(ctx context.Context, sp *types.Span, source
 		}
 	}
 
+}
+
+func (i *InMemCollector) makeIndividualSpanDecision(trace *types.Trace) *TraceDecision {
+	var sampler sample.Sampler
+	var found bool
+	samplerSelector, isLegacyKey := trace.GetSamplerKey()
+
+	if sampler, found = i.datasetSamplers[samplerSelector]; !found {
+		sampler = i.SamplerFactory.GetSamplerImplementationForKey(samplerSelector, isLegacyKey)
+		i.datasetSamplers[samplerSelector] = sampler
+	}
+
+	rate, shouldSend, reason, key := sampler.GetSampleRate(trace)
+	trace.SetSampleRate(rate)
+	trace.KeepSample = shouldSend
+
+	return &TraceDecision{
+		TraceID:         trace.ID(),
+		Kept:            shouldSend,
+		Reason:          reason,
+		SamplerKey:      key,
+		SamplerSelector: samplerSelector,
+		Rate:            rate,
+		SendReason:      TraceSendIndividualSpan,
+		Count:           trace.SpanCount(),
+		EventCount:      trace.SpanEventCount(),
+		LinkCount:       trace.SpanLinkCount(),
+		HasRoot:         true,
+	}
+
+}
+
+// processIndividualSpan is used to handle spans with the
+// meta.refinery.individual_span attribute set. This tells us to make a decision
+// immediately on just this span independently from the rest of its trace. We
+// still apply the configured samplers, using them as though this were a trace
+// of a single span. The decision is not saved and nothing enters the cache.
+// Since the trace does not need to be aggregated, there is no need to
+// redistribute the span to peers.
+func (i *InMemCollector) processIndividualSpan(ctx context.Context, sp *types.Span) {
+	_, span := otelutil.StartSpanWith(ctx, i.Tracer, "collector.processIndividualSpan", "trace_id", sp.TraceID)
+	defer span.End()
+
+	now := i.Clock.Now()
+
+	trace := &types.Trace{
+		APIHost:     sp.APIHost,
+		APIKey:      sp.APIKey,
+		Dataset:     sp.Dataset,
+		TraceID:     sp.TraceID,
+		ArrivalTime: now,
+		SendBy:      now,
+		RootSpan:    sp,
+	}
+	trace.AddSpan(sp)
+	trace.SetSampleRate(sp.SampleRate)
+
+	td := i.makeIndividualSpanDecision(trace)
+
+	if !td.Kept && !i.Config.GetIsDryRun() {
+		i.Metrics.Increment("individual_span_dropped")
+		return
+	}
+
+	i.Metrics.Increment(td.SendReason)
+
+	// if we have a key replacement rule, we should
+	// replace the key with the new key
+	keycfg := i.Config.GetAccessKeyConfig()
+	overwriteWith, err := keycfg.GetReplaceKey(trace.APIKey)
+	if err != nil {
+		i.Logger.Warn().Logf("error replacing key: %s", err.Error())
+		return
+	}
+	if overwriteWith != trace.APIKey {
+		trace.APIKey = overwriteWith
+	}
+
+	if i.Config.GetAddRuleReasonToTrace() {
+		sp.Data["meta.refinery.reason"] = td.Reason
+		sp.Data["meta.refinery.send_reason"] = td.SendReason
+		if td.SamplerKey != "" {
+			sp.Data["meta.refinery.sample_key"] = td.SamplerKey
+		}
+	}
+	isDryRun := i.Config.GetIsDryRun()
+	if isDryRun {
+		sp.Data[config.DryRunFieldName] = td.Kept
+	}
+	if i.hostname != "" {
+		sp.Data["meta.refinery.local_hostname"] = i.hostname
+	}
+	mergeTraceAndSpanSampleRates(sp, trace.SampleRate(), isDryRun)
+	i.addAdditionalAttributes(sp)
+
+	sp.APIKey = trace.APIKey
+	i.Transmission.EnqueueSpan(sp)
 }
 
 // ProcessSpanImmediately is an escape hatch used under stressful conditions --
