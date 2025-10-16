@@ -1475,6 +1475,48 @@ groups:
         description: >
           Sets the time interval for sending accumulated kept decisions in batches. This ensures that kept decisions are processed at regular intervals, improving efficiency by reducing the frequency of network transmissions. If the maximum batch size (MaxKeptDecisionBatchSize) is reached before this interval elapses, the batch will be sent immediately.
 
+      - name: IndividualSpanBatchSamplingCacheCapacity
+        type: int
+        valuetype: nondefault
+        firstversion: v2.9-fork
+        unpublished: true
+        default: 10_000
+        reload: true
+        summary: Maximum number of traces to store in the individual span batch sampling cache.
+        description: >
+          Specifies the maximum number of traces that can be stored in the
+          individual span batch sampling cache. This prevents the cache from
+          growing indefinitely if we have an influx of traces. When the cache is
+          full, we process the largest batch to free up space. Set this above
+          the expected number of individual span traces that will arrive during
+          IndividualSpanBatchSamplingWindow.
+
+      - name: UseIndividualSpanBatchSampling
+        type: bool
+        valuetype: nondefault
+        firstversion: v2.9-fork
+        unpublished: true
+        default: false
+        reload: true
+        summary: Whether to use individual span batch sampling.
+        description: >
+          If true, then Refinery will use individual span batch sampling to
+          sample traces. This is a more accurate way to sample traces than
+          the default Bernoulli sampling.
+
+      - name: IndividualSpanBatchSamplingWindow
+        type: duration
+        valuetype: nondefault
+        firstversion: v2.9-fork
+        unpublished: true
+        default: 15s
+        reload: true
+        summary: Window for batching individual spans.
+        description: >
+          Specifies the window of time over which individual spans will be
+          batch sampled. This is the time period over which we will accumulate
+          spans before processing them.
+
   - name: BufferSizes
     title: "Buffer Sizes"
     description: >

@@ -96,7 +96,8 @@ func newTestCollector(conf config.Config, transmission transmit.Transmission, pe
 				TraceIDs: peerTraceIDs,
 			},
 		},
-		redistributeTimer: redistributeNotifier,
+		redistributeTimer:                redistributeNotifier,
+		individualSpanBatchSamplingCache: cache.NewInMemIndividualSpanBatchSamplingCache(100, &metrics.NullMetrics{}, &logger.NullLogger{}),
 	}
 
 	if !conf.GetCollectionConfig().TraceLocalityEnabled() {
@@ -2564,8 +2565,11 @@ func TestAddIndividualSpan(t *testing.T) {
 		GetSamplerTypeVal:  &config.DeterministicSamplerConfig{SampleRate: 1},
 		ParentIdFieldNames: []string{"trace.parent_id", "parentId"},
 		GetCollectionConfigVal: config.CollectionConfig{
-			CacheCapacity: 3,
-			ShutdownDelay: config.Duration(1 * time.Millisecond),
+			CacheCapacity:                            3,
+			ShutdownDelay:                            config.Duration(1 * time.Millisecond),
+			UseIndividualSpanBatchSampling:           false,
+			IndividualSpanBatchSamplingCacheCapacity: 100,
+			IndividualSpanBatchSamplingWindow:        config.Duration(15 * time.Second),
 		},
 		SampleCache: config.SampleCacheConfig{
 			KeptSize:          100,
@@ -2625,13 +2629,21 @@ func TestAddIndividualSpan(t *testing.T) {
 	}
 
 	// Test with a span that should be dropped (non-dry run)
-	transmission.Events = make(chan *types.Event, 100) // Clear previous events
+	// Drain any remaining events
+	transmission.GetBlock(0)
+
 	conf.GetSamplerTypeVal = &config.RulesBasedSamplerConfig{Rules: []*config.RulesBasedSamplerRule{
 		{
 			Drop: true,
 		},
 	}}
 	c.Stop()
+
+	transmission2 := &transmit.MockTransmission{}
+	transmission2.Start()
+	defer transmission2.Stop()
+	c.Transmission = transmission2
+
 	err = c.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -2653,15 +2665,12 @@ func TestAddIndividualSpan(t *testing.T) {
 
 	// Verify the span was NOT enqueued since it should be dropped
 	// Use a small timeout to check if any events were enqueued
-	select {
-	case event := <-transmission.Events:
-		t.Errorf("Expected no spans to be enqueued (dropped), but got one: %v", event)
-	default:
-		// No events were enqueued, which is what we want
+	events2 := transmission2.GetBlock(0)
+	if len(events2) > 0 {
+		t.Errorf("Expected no spans to be enqueued (dropped), but got %d: %v", len(events2), events2)
 	}
 
 	// Test with a span that should be dropped but isn't because of dry-run
-	transmission.Events = make(chan *types.Event, 100) // Clear previous events
 	conf.DryRun = true
 	conf.GetSamplerTypeVal = &config.RulesBasedSamplerConfig{Rules: []*config.RulesBasedSamplerRule{
 		{
@@ -2669,6 +2678,12 @@ func TestAddIndividualSpan(t *testing.T) {
 		},
 	}}
 	c.Stop()
+
+	transmission3 := &transmit.MockTransmission{}
+	transmission3.Start()
+	defer transmission3.Stop()
+	c.Transmission = transmission3
+
 	err = c.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -2689,15 +2704,17 @@ func TestAddIndividualSpan(t *testing.T) {
 	c.AddIndividualSpan(sp3)
 
 	// Verify the span was enqueued
-	events = transmission.GetBlock(1)
-	if len(events) != 1 {
-		t.Errorf("Expected 1 span to be enqueued, got %d", len(events))
+	events3 := transmission3.GetBlock(1)
+	if len(events3) != 1 {
+		t.Errorf("Expected 1 span to be enqueued, got %d", len(events3))
 	}
 
 	// Verify the enqueued span has the expected data
-	enqueuedSpan = events[0]
-	if enqueuedSpan.Data["name"] != "test-span-3" {
-		t.Errorf("Expected span name 'test-span-3', got %v", enqueuedSpan.Data["name"])
+	if len(events3) > 0 {
+		enqueuedSpan3 := events3[0]
+		if enqueuedSpan3.Data["name"] != "test-span-3" {
+			t.Errorf("Expected span name 'test-span-3', got %v", enqueuedSpan3.Data["name"])
+		}
 	}
 
 	// Verify the span is not in the sample trace cache

@@ -330,6 +330,10 @@ type CollectionConfig struct {
 	DropDecisionSendInterval Duration `yaml:"DropDecisionSendInterval" default:"1s"`
 	MaxKeptDecisionBatchSize int      `yaml:"MaxKeptDecisionBatchSize" default:"1000"`
 	KeptDecisionSendInterval Duration `yaml:"KeptDecisionSendInterval" default:"1s"`
+
+	IndividualSpanBatchSamplingCacheCapacity int      `yaml:"IndividualSpanBatchSamplingCacheCapacity" default:"10_000"`
+	UseIndividualSpanBatchSampling           bool     `yaml:"UseIndividualSpanBatchSampling" default:"false"`
+	IndividualSpanBatchSamplingWindow        Duration `yaml:"IndividualSpanBatchSamplingWindow" default:"15s"`
 }
 
 // GetMaxAlloc returns the maximum amount of memory to use for the cache.
