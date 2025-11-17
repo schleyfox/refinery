@@ -344,7 +344,7 @@ func TestProcessIndividualSpan_WithBatchSampling(t *testing.T) {
 	// Each batch should have 3 spans
 	for _, batch := range allBatches {
 		assert.Len(t, batch.Traces, 3, "each batch should have 3 spans")
-		assert.Contains(t, []string{"batch-1", "batch-2"}, batch.Key, "key should be batch-1 or batch-2")
+		assert.Contains(t, []string{"batch-1", "batch-2"}, batch.BatchKey.SamplerKey, "key should be batch-1 or batch-2")
 	}
 
 	assert.Equal(t, 0, len(transmission.Events), "no spans should be sent yet")
@@ -482,7 +482,7 @@ func TestSendExpiredIndividualSpansBatchSampling(t *testing.T) {
 	assert.Equal(t, 10, individualCache.GetCacheEntryCount(), "all 10 spans should be in cache")
 	allBatches := individualCache.GetAll()
 	require.Len(t, allBatches, 1, "should be single batch")
-	assert.Equal(t, "batch-1", allBatches[0].Key, "batch key should be batch-1")
+	assert.Equal(t, "batch-1", allBatches[0].BatchKey.SamplerKey, "batch key should be batch-1")
 	assert.Len(t, allBatches[0].Traces, 10, "batch should have 10 traces")
 
 	// Advance time past expiration (15 seconds is the batch window)
@@ -577,7 +577,7 @@ func TestCacheFullBehavior(t *testing.T) {
 	// Verify batch structure
 	allBatches := individualCache.GetAll()
 	require.Len(t, allBatches, 1, "should have 1 batch")
-	assert.Equal(t, "batch-1", allBatches[0].Key)
+	assert.Equal(t, "batch-1", allBatches[0].BatchKey.SamplerKey)
 	assert.Len(t, allBatches[0].Traces, 8)
 
 	// Add 2 more spans with different key to fill cache
@@ -637,7 +637,7 @@ func TestCacheFullBehavior(t *testing.T) {
 	allBatches = individualCache.GetAll()
 	batchKeys := make(map[string]bool)
 	for _, batch := range allBatches {
-		batchKeys[batch.Key] = true
+		batchKeys[batch.BatchKey.SamplerKey] = true
 	}
 	assert.False(t, batchKeys["batch-1"], "batch-1 should have been evicted")
 	assert.True(t, batchKeys["batch-2"], "batch-2 should still be present")
@@ -750,7 +750,7 @@ func TestMultipleBatchesWithDifferentKeys(t *testing.T) {
 
 	batchSizes := make(map[string]int)
 	for _, batch := range allBatches {
-		batchSizes[batch.Key] = len(batch.Traces)
+		batchSizes[batch.BatchKey.SamplerKey] = len(batch.Traces)
 		assert.Equal(t, uint(3), batch.SampleRate, "all batches should have rate 3")
 	}
 	assert.Equal(t, 12, batchSizes["key-1"], "batch key-1 should have 12 spans")
@@ -793,9 +793,11 @@ func makeKeyedTraces(n int, desiredRate uint) *cache.KeyedTraces {
 	}
 
 	return &cache.KeyedTraces{
-		Key:        "test-key",
+		BatchKey: cache.BatchKey{
+			Reason:     "test",
+			SamplerKey: "test-key",
+		},
 		SampleRate: desiredRate,
-		Reason:     "test",
 		Traces:     traces,
 		Expiration: now.Add(time.Minute),
 	}

@@ -36,17 +36,17 @@ func TestIndividualSpanBatchSamplingCache_AddAndGet(t *testing.T) {
 	ok = c.Add(20, "test-reason-2", "key2", trace2)
 	assert.True(t, ok, "should successfully add second trace")
 
-	kt := c.Get("key1")
+	kt := c.Get("test-reason", "key1")
 	require.NotNil(t, kt)
 	require.Len(t, kt.Traces, 1)
 	assert.Equal(t, trace1, kt.Traces[0])
 
-	kt = c.Get("key2")
+	kt = c.Get("test-reason-2", "key2")
 	require.NotNil(t, kt)
 	require.Len(t, kt.Traces, 1)
 	assert.Equal(t, trace2, kt.Traces[0])
 
-	kt = c.Get("nonexistent")
+	kt = c.Get("nonexistent", "nonexistent")
 	assert.Nil(t, kt)
 }
 
@@ -63,13 +63,13 @@ func TestIndividualSpanBatchSamplingCache_AddMultipleTracesToSameKey(t *testing.
 	ok := c.Add(10, "reason1", "key1", trace1)
 	assert.True(t, ok)
 
-	ok = c.Add(20, "reason2", "key1", trace2)
+	ok = c.Add(20, "reason1", "key1", trace2)
 	assert.True(t, ok)
 
-	ok = c.Add(15, "reason3", "key1", trace3)
+	ok = c.Add(15, "reason1", "key1", trace3)
 	assert.True(t, ok)
 
-	kt := c.Get("key1")
+	kt := c.Get("reason1", "key1")
 	require.NotNil(t, kt)
 	require.Len(t, kt.Traces, 3)
 	assert.Contains(t, kt.Traces, trace1)
@@ -109,8 +109,15 @@ func TestIndividualSpanBatchSamplingCache_ReasonIsFirst(t *testing.T) {
 	c.Add(10, "second-reason", "key1", trace2)
 
 	all := c.GetAll()
-	require.Len(t, all, 1)
-	assert.Equal(t, "first-reason", all[0].Reason, "reason should be from first trace")
+	require.Len(t, all, 2, "different reasons create different batches")
+
+	// Check both batches exist
+	reasonMap := make(map[string]bool)
+	for _, kt := range all {
+		reasonMap[kt.BatchKey.Reason] = true
+	}
+	assert.True(t, reasonMap["first-reason"], "first-reason batch should exist")
+	assert.True(t, reasonMap["second-reason"], "second-reason batch should exist")
 }
 
 func TestIndividualSpanBatchSamplingCache_GetAll(t *testing.T) {
@@ -128,15 +135,15 @@ func TestIndividualSpanBatchSamplingCache_GetAll(t *testing.T) {
 	c.Add(30, "reason", "key1", trace3) // same key as trace1
 
 	all := c.GetAll()
-	assert.Len(t, all, 2, "should have 2 unique keys")
+	assert.Len(t, all, 2, "should have 2 unique batch keys")
 
 	// Find key1 and key2 in the results
 	var key1Found, key2Found bool
 	for _, kt := range all {
-		if kt.Key == "key1" {
+		if kt.BatchKey.SamplerKey == "key1" {
 			key1Found = true
 			assert.Len(t, kt.Traces, 2, "key1 should have 2 traces")
-		} else if kt.Key == "key2" {
+		} else if kt.BatchKey.SamplerKey == "key2" {
 			key2Found = true
 			assert.Len(t, kt.Traces, 1, "key2 should have 1 trace")
 		}
@@ -236,17 +243,17 @@ func TestIndividualSpanBatchSamplingCache_TakeExpiredSpans(t *testing.T) {
 	// Check that expired ones are returned
 	expiredKeys := make(map[string]bool)
 	for _, kt := range expired {
-		expiredKeys[kt.Key] = true
+		expiredKeys[kt.BatchKey.SamplerKey] = true
 	}
 	assert.True(t, expiredKeys["key1"], "key1 should be expired")
 	assert.True(t, expiredKeys["key2"], "key2 should be expired")
 
 	// Check that only non-expired remain in cache
 	assert.Equal(t, 2, c.GetCacheEntryCount())
-	assert.NotNil(t, c.Get("key3"), "key3 should still be in cache")
-	assert.NotNil(t, c.Get("key4"), "key4 should still be in cache")
-	assert.Nil(t, c.Get("key1"), "key1 should be removed")
-	assert.Nil(t, c.Get("key2"), "key2 should be removed")
+	assert.NotNil(t, c.Get("reason", "key3"), "key3 should still be in cache")
+	assert.NotNil(t, c.Get("reason", "key4"), "key4 should still be in cache")
+	assert.Nil(t, c.Get("reason", "key1"), "key1 should be removed")
+	assert.Nil(t, c.Get("reason", "key2"), "key2 should be removed")
 }
 
 func TestIndividualSpanBatchSamplingCache_TakeExpiredSpansWithLimit(t *testing.T) {
@@ -284,15 +291,15 @@ func TestIndividualSpanBatchSamplingCache_TakeExpiredSpansReturnsOldestFirst(t *
 	// Take expired spans one at a time to verify order
 	expired := c.TakeExpiredSpans(now, 1)
 	require.Len(t, expired, 1)
-	assert.Equal(t, "key1", expired[0].Key, "oldest should be returned first")
+	assert.Equal(t, "key1", expired[0].BatchKey.SamplerKey, "oldest should be returned first")
 
 	expired = c.TakeExpiredSpans(now, 1)
 	require.Len(t, expired, 1)
-	assert.Equal(t, "key2", expired[0].Key, "second oldest should be returned next")
+	assert.Equal(t, "key2", expired[0].BatchKey.SamplerKey, "second oldest should be returned next")
 
 	expired = c.TakeExpiredSpans(now, 1)
 	require.Len(t, expired, 1)
-	assert.Equal(t, "key3", expired[0].Key, "third oldest should be returned last")
+	assert.Equal(t, "key3", expired[0].BatchKey.SamplerKey, "third oldest should be returned last")
 }
 
 func TestIndividualSpanBatchSamplingCache_TakeExpiredSpansEmptyCache(t *testing.T) {
@@ -325,23 +332,23 @@ func TestIndividualSpanBatchSamplingCache_TakeLargestBatch(t *testing.T) {
 	// Take largest batch
 	largest := c.TakeLargestBatch()
 	require.NotNil(t, largest)
-	assert.Equal(t, "key1", largest.Key, "key1 has the most traces")
+	assert.Equal(t, "key1", largest.BatchKey.SamplerKey, "key1 has the most traces")
 	assert.Len(t, largest.Traces, 3)
 
 	// Verify it's removed from cache
-	assert.Nil(t, c.Get("key1"))
+	assert.Nil(t, c.Get("reason", "key1"))
 	assert.Equal(t, 3, c.GetCacheEntryCount(), "should have 3 traces left (2 from key2 and 1 from key3)")
 
 	// Take next largest
 	largest = c.TakeLargestBatch()
 	require.NotNil(t, largest)
-	assert.Equal(t, "key2", largest.Key)
+	assert.Equal(t, "key2", largest.BatchKey.SamplerKey)
 	assert.Len(t, largest.Traces, 2)
 
 	// Take last one
 	largest = c.TakeLargestBatch()
 	require.NotNil(t, largest)
-	assert.Equal(t, "key3", largest.Key)
+	assert.Equal(t, "key3", largest.BatchKey.SamplerKey)
 	assert.Len(t, largest.Traces, 1)
 
 	// Cache should be empty now
@@ -421,9 +428,9 @@ func TestIndividualSpanBatchSamplingCache_KeyedTracesStructure(t *testing.T) {
 	require.Len(t, all, 1)
 
 	kt := all[0]
-	assert.Equal(t, "test-key", kt.Key)
+	assert.Equal(t, "test-key", kt.BatchKey.SamplerKey)
 	assert.Equal(t, uint(42), kt.SampleRate)
-	assert.Equal(t, "test-reason", kt.Reason)
+	assert.Equal(t, "test-reason", kt.BatchKey.Reason)
 	assert.Equal(t, sendBy, kt.Expiration)
 	assert.Len(t, kt.Traces, 1)
 	assert.Equal(t, trace1, kt.Traces[0])
@@ -487,7 +494,7 @@ func BenchmarkIndividualSpanBatchSamplingCache_Get(b *testing.B) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		c.Get(keys[i%100])
+		c.Get("reason", keys[i%100])
 	}
 }
 

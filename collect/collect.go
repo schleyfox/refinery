@@ -174,9 +174,10 @@ var inMemCollectorMetrics = []metrics.Metadata{
 	{Name: "collector_kept_decisions_queue_full", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of times kept trace decision queue is full"},
 	{Name: "collector_drop_decisions_queue_full", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of times drop trace decision queue is full"},
 	{Name: "collector_cache_eviction", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of times cache eviction has occurred"},
+
 	{Name: "collector_send_expired_individual_spans_batch_sampling_dur_ms", Type: metrics.Histogram, Unit: metrics.Milliseconds, Description: "duration of sending expired individual spans in batch sampling"},
 	{Name: "collector_send_individual_spans_batch_on_full_cache_dur_ms", Type: metrics.Histogram, Unit: metrics.Milliseconds, Description: "duration of sending individual spans batch on full cache"},
-	{Name: "individual_span_dropped", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of individual spans dropped due to batch sampling"},
+	{Name: "individual_span_dropped", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of individual spans dropped due to sampling"},
 }
 
 func (i *InMemCollector) Start() error {
@@ -977,6 +978,19 @@ func (i *InMemCollector) processIndividualSpan(ctx context.Context, sp *types.Sp
 
 }
 
+func (i *InMemCollector) addBatchSamplingMetadata(traces []*types.Trace, batchSize int, kept int, batchSendReason string) {
+	// TODO: get our own config value
+	if i.Config.GetAddRuleReasonToTrace() {
+		for _, trace := range traces {
+			for _, sp := range trace.GetSpans() {
+				sp.Data["meta.refinery.batch_sampling.send_reason"] = batchSendReason
+				sp.Data["meta.refinery.batch_sampling.batch_size"] = batchSize
+				sp.Data["meta.refinery.batch_sampling.kept"] = kept
+			}
+		}
+	}
+}
+
 func (i *InMemCollector) enqueueIndividualSpans(trace *types.Trace) {
 	// should only ever be a single span
 	for _, sp := range trace.GetSpans() {
@@ -1003,6 +1017,8 @@ func (i *InMemCollector) sendExpiredIndividualSpansBatchSampling(ctx context.Con
 	for _, keyedTraces := range expiredKeyedTracesList {
 		traces := sampleIndividualSpansBatch(keyedTraces)
 		i.Metrics.Count("individual_span_dropped", float64(len(keyedTraces.Traces)-len(traces)))
+
+		i.addBatchSamplingMetadata(traces, len(keyedTraces.Traces), len(traces), "expired")
 		for _, trace := range traces {
 			i.enqueueIndividualSpans(trace)
 		}
@@ -1032,6 +1048,7 @@ func (i *InMemCollector) sendIndividualSpansBatchOnFullCache(ctx context.Context
 
 	traces := sampleIndividualSpansBatch(largestBatch)
 	i.Metrics.Count("individual_span_dropped", float64(len(largestBatch.Traces)-len(traces)))
+	i.addBatchSamplingMetadata(traces, len(largestBatch.Traces), len(traces), "cache_full")
 	for _, trace := range traces {
 		i.enqueueIndividualSpans(trace)
 	}
