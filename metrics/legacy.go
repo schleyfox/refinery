@@ -276,6 +276,7 @@ func (h *LegacyMetrics) reportToHoneycomb(ctx context.Context) {
 					ev.AddField(histogram.name+"_min", histogram.vals[0])
 					ev.AddField(histogram.name+"_max", histogram.vals[len(histogram.vals)-1])
 					ev.AddField(histogram.name+"_avg", average(histogram.vals))
+					ev.AddField(histogram.name+"_count", len(histogram.vals))
 					histogram.vals = histogram.vals[:0]
 				}
 				histogram.lock.Unlock()
